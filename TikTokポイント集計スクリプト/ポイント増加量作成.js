@@ -1,4 +1,7 @@
 function ポイント増加量作成() {
+  // ✅ フォームから送信された出金データを機種ごとに分解して同期
+  出金データ同期();
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sourceSheet = ss.getSheetByName("TikTokﾌｫｰﾑﾃﾞｰﾀ");
   const withdrawSheet = ss.getSheetByName("TikTok出金ﾃﾞｰﾀ");

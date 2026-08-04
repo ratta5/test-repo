@@ -50,10 +50,36 @@ function ポイント増加量作成() {
   outputHeader.push("当月累計");
   output.push(outputHeader);
 
+  // 機種ごとに最新の有効残高と入力日を追跡するオブジェクト
+  const deviceStates = {};
+  balanceCols.forEach(obj => {
+    deviceStates[obj.deviceId] = {
+      lastBalance: null,
+      lastDateStr: null
+    };
+  });
+
+  // 1行目のデータ(row = 1)が存在する場合、最初の基準残高として初期セット
+  if (sourceData.length > 1) {
+    const firstRow = sourceData[1];
+    const firstRawDate = firstRow[dateColIndex];
+    if (firstRawDate) {
+      const firstDateStr = Utilities.formatDate(new Date(firstRawDate), "Asia/Tokyo", "yyyy/MM/dd");
+      for (let i = 0; i < balanceCols.length; i++) {
+        const colIndex = balanceCols[i].col;
+        const deviceId = balanceCols[i].deviceId;
+        const val = firstRow[colIndex];
+        if (typeof val === "number" || (val !== "" && val !== null && !isNaN(Number(val)))) {
+          deviceStates[deviceId].lastBalance = Number(val);
+          deviceStates[deviceId].lastDateStr = firstDateStr;
+        }
+      }
+    }
+  }
+
   const monthlySumMap = {};
   for (let row = 2; row < sourceData.length; row++) {
     const currentRow = sourceData[row];
-    const prevRow = sourceData[row - 1];
     const rawDate = currentRow[dateColIndex];
     if (!rawDate) continue;
 
@@ -65,11 +91,32 @@ function ポイント増加量作成() {
     for (let i = 0; i < balanceCols.length; i++) {
       const colIndex = balanceCols[i].col;
       const deviceId = balanceCols[i].deviceId;
-      const current = currentRow[colIndex];
-      const prev = prevRow[colIndex];
-      const diff = (typeof current === "number" && typeof prev === "number") ? current - prev : 0;
-      const withdraw = withdrawMap[dateStr]?.[deviceId] || 0;
-      const totalGain = diff + withdraw;
+      const currentRaw = currentRow[colIndex];
+      const state = deviceStates[deviceId];
+
+      let totalGain = 0;
+      const hasValue = (typeof currentRaw === "number") || (currentRaw !== "" && currentRaw !== null && !isNaN(Number(currentRaw)));
+
+      if (hasValue) {
+        const current = Number(currentRaw);
+        if (state.lastBalance !== null && state.lastDateStr !== null) {
+          const diff = current - state.lastBalance;
+          // 前回入力日より後 〜 今回入力日までの期間出金合計
+          const withdrawSum = getWithdrawSumInPeriod(withdrawMap, deviceId, state.lastDateStr, dateStr);
+          totalGain = diff + withdrawSum;
+        } else {
+          // 初回の有効残高記録
+          const withdrawSum = withdrawMap[dateStr]?.[deviceId] || 0;
+          totalGain = withdrawSum;
+        }
+
+        // 有効な残高・日付で最新状態を更新
+        state.lastBalance = current;
+        state.lastDateStr = dateStr;
+      } else {
+        // 残高が未入力（空欄）の日は今回の獲得ポイントを 0 とする（次回入力時にまとめて精算）
+        totalGain = 0;
+      }
 
       rowOut.push(totalGain);
       dailyTotal += totalGain;
@@ -104,6 +151,20 @@ function ポイント増加量作成() {
 }
 
 
+/**
+ * 前回入力日(startDateStr)より後 〜 今回入力日(endDateStr)までの期間で発生した出金額を合計
+ */
+function getWithdrawSumInPeriod(withdrawMap, deviceId, startDateStr, endDateStr) {
+  let sum = 0;
+  for (const dStr in withdrawMap) {
+    if (dStr > startDateStr && dStr <= endDateStr) {
+      if (withdrawMap[dStr] && withdrawMap[dStr][deviceId]) {
+        sum += withdrawMap[dStr][deviceId];
+      }
+    }
+  }
+  return sum;
+}
 function 列を拡張する() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("TikTok集計ﾃﾞｰﾀ");

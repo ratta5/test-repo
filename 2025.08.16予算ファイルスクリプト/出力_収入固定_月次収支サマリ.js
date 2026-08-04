@@ -1,108 +1,65 @@
-/***** エントリーポイント *****/
+/***** 収入固定_月次収支サマリ出力（スリム版） *****/
 function 出力_収入固定_月次収支サマリ() {
-  const SS = SpreadsheetApp.getActiveSpreadsheet();
-  const SH_INCOME = '収入_固定';
-  const SH_SUMMARY = '月次収支サマリ';
-  const SUMMARY_MONTH_HEADER = '年月';       // A列想定
-  const SUMMARY_TARGET_HEADER = '収入_固定';  // B列
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const shIncome = ss.getSheetByName('収入_固定');
+  const shSummary = ss.getSheetByName('月次収支サマリ');
 
-  const shIncome = SS.getSheetByName(SH_INCOME);
-  const shSummary = SS.getSheetByName(SH_SUMMARY);
+  // 列インデックスの取得 (0始まり)
+  const getColIdx = (sh, name) => {
+    const idx = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].indexOf(name);
+    if (idx === -1) throw new Error(`見出し「${name}」が見つかりません`);
+    return idx;
+  };
 
-  const incomeMap = getHeaderMap_(shIncome);
-  const colStart = colOrThrow_(incomeMap, '開始年月');
-  const colEnd   = colOrThrow_(incomeMap, '終了年月');
-  const colAmt   = colOrThrow_(incomeMap, '金額');
+  const colStart = getColIdx(shIncome, '開始年月');
+  const colEnd = getColIdx(shIncome, '終了年月');
+  const colAmt = getColIdx(shIncome, '金額');
+  const colMonth = getColIdx(shSummary, '年月') + 1;  // Range用に1始まり
+  const colTarget = getColIdx(shSummary, '収入_固定') + 1;
 
-  const summaryMap = getHeaderMap_(shSummary);
-  const colMonth  = colOrThrow_(summaryMap, SUMMARY_MONTH_HEADER);
-  const colTarget = colOrThrow_(summaryMap, SUMMARY_TARGET_HEADER);
-
-  // 月リスト（A2:最終行）
+  // サマリ側の「年月」リストを取得して YYYYMM (例: 202508) の数値キーに変換
   const lastRow = Math.max(shSummary.getLastRow(), 2);
-  const monthVals = shSummary.getRange(2, colMonth, lastRow - 1, 1).getValues();
-  const months = monthVals.map(r => normalizeToMonthDate_(r[0]))
-                          .map(d => d ? monthKey_(d) : null);
+  const months = shSummary.getRange(2, colMonth, lastRow - 1, 1).getValues().map(r => parseMonthKey_(r[0]));
 
   if (months.length === 0) return;
 
-  // 合計配列
-  const monthTotals = new Array(months.length).fill(0);
+  // 収入_固定データの集計
+  const incomeRows = shIncome.getDataRange().getValues().slice(1);
+  const monthTotals = months.map(mKey => {
+    if (!mKey) return ['']; // 年月が空の行は空欄
 
-  // 収入_固定を集計
-  const rows = shIncome.getDataRange().getValues().slice(1);
-  for (const row of rows) {
-    const start = row[colStart - 1];
-    const end   = row[colEnd   - 1];
-    const amt   = toNumberOrZero_(row[colAmt   - 1]);
-    if (!amt) continue;
+    const sum = incomeRows.reduce((acc, row) => {
+      const amt = Number(String(row[colAmt]).replace(/[^\d.-]/g, '')) || 0; // ¥やカンマを除去して数値化
+      if (!amt) return acc;
 
-    const startKey = start ? monthKey_(normalizeToMonthDate_(start)) : null;
-    const endKey   = end   ? monthKey_(normalizeToMonthDate_(end))   : null;
+      const startKey = parseMonthKey_(row[colStart]);
+      const endKey = parseMonthKey_(row[colEnd]);
+      const okStart = !startKey || mKey >= startKey;
+      const okEnd = !endKey || mKey <= endKey;
 
-    months.forEach((mk, i) => {
-      if (!mk) return; // 年月が空/無効はスキップ
-      const okStart = (startKey === null) || (mk >= startKey);
-      const okEnd   = (endKey   === null) || (mk <= endKey);
-      if (okStart && okEnd) monthTotals[i] += amt;
-    });
-  }
+      return (okStart && okEnd) ? acc + amt : acc;
+    }, 0);
 
-  // --- B列をシート末尾まで丸ごと初期化（B1は残す）---
+    return [sum];
+  });
+
+  // クリア & 出力
   const maxRows = shSummary.getMaxRows();
   if (maxRows > 1) {
-    const wholeB = shSummary.getRange(2, colTarget, maxRows - 1, 1);
-    wholeB.clearContent();
-    wholeB.clearDataValidations();
-    wholeB.clearFormat();
+    shSummary.getRange(2, colTarget, maxRows - 1, 1).clearContent();
   }
-  SpreadsheetApp.flush();
 
-  // 書き込み（無効な年月行は空欄のまま）
-  const outRange = shSummary.getRange(2, colTarget, months.length, 1);
-  const out = monthTotals.map((v, i) => [months[i] ? Number(v) || 0 : '']);
-  outRange.setValues(out);
-
-  // 必要なら通貨表示（まずは数値として正常表示するか確認したいのでコメント可）
+  const outRange = shSummary.getRange(2, colTarget, monthTotals.length, 1);
+  outRange.setValues(monthTotals);
   outRange.setNumberFormat('¥#,##0;[Red]-¥#,##0;0');
 }
 
-/***** ヘルパー群 *****/
-function getHeaderMap_(sheet) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const map = {};
-  headers.forEach((h, i) => map[String(h).trim()] = i + 1);
-  return map;
-}
-function colOrThrow_(map, name) {
-  const c = map[name];
-  if (!c) throw new Error('見出し「' + name + '」が見つかりません');
-  return c;
-}
-function normalizeToMonthDate_(v) {
-  if (!v && v !== 0) return null;
-  if (v instanceof Date) return new Date(v.getFullYear(), v.getMonth(), 1);
-  const s = String(v).trim();
-  const m = s.match(/^(\d{4})[\/\-\.年]?(\d{1,2})/);
-  if (m) return new Date(parseInt(m[1],10), parseInt(m[2],10)-1, 1);
-  const n = Number(s);
-  if (!isNaN(n)) {
-    const d = new Date(Math.round((n - 25569) * 86400 * 1000));
-    return new Date(d.getFullYear(), d.getMonth(), 1);
-  }
-  return null;
-}
-function monthKey_(d) {
-  return d.getFullYear()*100 + (d.getMonth()+1);
-}
-function toNumberOrZero_(v) {
-  if (typeof v === 'number') return v || 0;
-  // 通貨記号/スペース/全角マイナス/長音等を除去、括弧マイナスにも対応
-  const s = String(v).trim();
-  const neg = /^\(.*\)$/.test(s);
-  const cleaned = s.replace(/[\(\)]/g, '')
-                   .replace(/[¥,\s\u3000\u2212\uFF0D]/g, '');
-  const n = Number(cleaned);
-  if (isNaN(n)) return 0;
-  return neg ? -n : n;
+/**
+ * 年月を YYYYMM (数値) に変換するヘルパー
+ */
+function parseMonthKey_(val) {
+  if (!val && val !== 0) return null;
+  if (val instanceof Date) return val.getFullYear() * 100 + (val.getMonth() + 1);
+  const m = String(val).match(/^(\d{4})[\/\-\.年]?(\d{1,2})/);
+  return m ? parseInt(m[1], 10) * 100 + parseInt(m[2], 10) : null;
 }

@@ -17,11 +17,11 @@ function 出金データ同期() {
   const rawData = rawSheet.getDataRange().getValues();
   if (rawData.length < 2) {
     cleanSheet.clear();
-    cleanSheet.appendRow(["タイムスタンプ", "日付", "機種", "金額"]); // ヘッダー
+    cleanSheet.appendRow(["タイムスタンプ", "日付", "機種", "金額", "出金年月"]); // ヘッダー
     return;
   }
   
-  const headers = rawData[0];
+  const headers = ["タイムスタンプ", "日付", "機種", "金額", "出金年月"];
   const output = [headers]; // ヘッダーを維持
   
   for (let i = 1; i < rawData.length; i++) {
@@ -33,15 +33,48 @@ function 出金データ同期() {
     
     if (!devicesRaw) continue;
     
+    // 出金年月を取得（日付からyyyy/MM形式を作成。日付が無効の場合はタイムスタンプからフォールバック）
+    const yearMonth = formatYearMonth(date, timestamp);
+    
     // カンマ（半角・全角）、読点、改行などで分割してトリミング
     const devices = devicesRaw.split(/[,，、\n]+/).map(d => d.trim()).filter(Boolean);
     
     devices.forEach(device => {
       // 1機種ごとに独立した行を作成（金額はそのまま適用）
-      output.push([timestamp, date, device, amount]);
+      output.push([timestamp, date, device, amount, yearMonth]);
     });
   }
   
   cleanSheet.clear();
   cleanSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+/**
+ * 日付（またはタイムスタンプ）から「yyyy/MM」形式の文字列を生成します。
+ */
+function formatYearMonth(dateVal, timestampVal) {
+  let d = null;
+  if (dateVal) {
+    if (dateVal instanceof Date && !isNaN(dateVal.getTime())) {
+      d = dateVal;
+    } else {
+      const str = String(dateVal).replace(/\./g, '/').trim();
+      const parsed = new Date(str);
+      if (!isNaN(parsed.getTime())) {
+        d = parsed;
+      }
+    }
+  }
+  if (!d && timestampVal) {
+    if (timestampVal instanceof Date && !isNaN(timestampVal.getTime())) {
+      d = timestampVal;
+    } else {
+      const str = String(timestampVal).replace(/\./g, '/').trim();
+      const parsed = new Date(str);
+      if (!isNaN(parsed.getTime())) {
+        d = parsed;
+      }
+    }
+  }
+  return d ? Utilities.formatDate(d, "Asia/Tokyo", "yyyy/MM") : "";
 }

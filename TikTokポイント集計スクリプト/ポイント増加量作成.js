@@ -55,7 +55,7 @@ function ポイント増加量作成() {
   balanceCols.forEach(obj => {
     deviceStates[obj.deviceId] = {
       lastBalance: null,
-      lastDateStr: null
+      lastDate: null
     };
   });
 
@@ -64,14 +64,13 @@ function ポイント増加量作成() {
     const firstRow = sourceData[1];
     const firstRawDate = firstRow[dateColIndex];
     if (firstRawDate) {
-      const firstDateStr = Utilities.formatDate(new Date(firstRawDate), "Asia/Tokyo", "yyyy/MM/dd");
       for (let i = 0; i < balanceCols.length; i++) {
         const colIndex = balanceCols[i].col;
         const deviceId = balanceCols[i].deviceId;
         const val = firstRow[colIndex];
         if (typeof val === "number" || (val !== "" && val !== null && !isNaN(Number(val)))) {
           deviceStates[deviceId].lastBalance = Number(val);
-          deviceStates[deviceId].lastDateStr = firstDateStr;
+          deviceStates[deviceId].lastDate = firstRawDate;
         }
       }
     }
@@ -99,10 +98,10 @@ function ポイント増加量作成() {
 
       if (hasValue) {
         const current = Number(currentRaw);
-        if (state.lastBalance !== null && state.lastDateStr !== null) {
+        if (state.lastBalance !== null && state.lastDate !== null) {
           const diff = current - state.lastBalance;
           // 前回入力日より後 〜 今回入力日までの期間出金合計
-          const withdrawSum = getWithdrawSumInPeriod(withdrawMap, deviceId, state.lastDateStr, dateStr);
+          const withdrawSum = getWithdrawSumInPeriod(withdrawData, deviceId, state.lastDate, rawDate);
           totalGain = diff + withdrawSum;
         } else {
           // 初回の有効残高記録
@@ -112,7 +111,7 @@ function ポイント増加量作成() {
 
         // 有効な残高・日付で最新状態を更新
         state.lastBalance = current;
-        state.lastDateStr = dateStr;
+        state.lastDate = rawDate;
       } else {
         // 残高が未入力（空欄）の日は今回の獲得ポイントを 0 とする（次回入力時にまとめて精算）
         totalGain = 0;
@@ -152,15 +151,44 @@ function ポイント増加量作成() {
 
 
 /**
- * 前回入力日(startDateStr)より後 〜 今回入力日(endDateStr)までの期間で発生した出金額を合計
+ * 日付オブジェクトを 00:00:00 に正規化して取得するヘルパー関数
  */
-function getWithdrawSumInPeriod(withdrawMap, deviceId, startDateStr, endDateStr) {
+function parseDate(val) {
+  if (!val) return null;
+  let d = (val instanceof Date) ? val : new Date(val);
+  if (isNaN(d.getTime())) return null;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/**
+ * 前回入力日(startDateStr/Date)より後 〜 今回入力日(endDateStr/Date)までの期間で発生した出金額を合計
+ */
+function getWithdrawSumInPeriod(withdrawData, deviceId, startDateVal, endDateVal) {
+  const startD = parseDate(startDateVal);
+  const endD = parseDate(endDateVal);
+  if (!startD || !endD) return 0;
+
+  const startTime = startD.getTime();
+  const endTime = endD.getTime();
+  const targetDevice = String(deviceId).trim();
+
   let sum = 0;
-  for (const dStr in withdrawMap) {
-    if (dStr > startDateStr && dStr <= endDateStr) {
-      if (withdrawMap[dStr] && withdrawMap[dStr][deviceId]) {
-        sum += withdrawMap[dStr][deviceId];
-      }
+  for (let i = 1; i < withdrawData.length; i++) {
+    const row = withdrawData[i];
+    const dateCell = row[1];
+    const device = row[2];
+    const amount = parseFloat(row[3]);
+
+    if (!dateCell || !device || isNaN(amount)) continue;
+    if (String(device).trim() !== targetDevice) continue;
+
+    const d = parseDate(dateCell);
+    if (!d) continue;
+
+    const t = d.getTime();
+    // 前回入力日より後 〜 今回入力日以前
+    if (t > startTime && t <= endTime) {
+      sum += amount;
     }
   }
   return sum;

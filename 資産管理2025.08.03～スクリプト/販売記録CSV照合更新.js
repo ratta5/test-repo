@@ -8,6 +8,7 @@ function 販売記録CSV照合の更新() {
   // 1. 対象シートの取得
   const srcSheet = ss.getSheetByName("販売記録（CSV取り込み）");
   const masterSheet = ss.getSheetByName("商品マスタ_統合");
+  const salesSheet = ss.getSheetByName("販売速報（フォーム回答）");
 
   if (!srcSheet) {
     throw new Error("「販売記録（CSV取り込み）」シートが見つかりません。");
@@ -21,7 +22,7 @@ function 販売記録CSV照合の更新() {
   let destSheet = ss.getSheetByName(destSheetName);
   let isNewDestSheet = false;
 
-  const destHeaders = ["商品ID", "メルカリ商品名", "商品マスタ No", "マスタ商品名", "購入者", "購入日時"];
+  const destHeaders = ["商品ID", "メルカリ商品名", "商品マスタ No", "マスタ商品名", "購入者", "購入日時", "速報購入者情報", "候補商品マスタNo", "仮マスタ商品名"];
 
   if (!destSheet) {
     destSheet = ss.insertSheet(destSheetName);
@@ -31,13 +32,22 @@ function 販売記録CSV照合の更新() {
     destSheet.setFrozenRows(1);
     isNewDestSheet = true;
   } else {
-    // 既存シートのヘッダーが不足している場合は「購入者」「購入日時」を追記
+    // 既存シートのヘッダーが不足している場合は「購入者」「購入日時」「速報購入者情報」「候補商品マスタNo」「仮マスタ商品名」を追記
     const currentHeaders = destSheet.getRange(1, 1, 1, destHeaders.length).getValues()[0];
     if (currentHeaders.length < 5 || String(currentHeaders[4]).trim() === "") {
       destSheet.getRange(1, 5).setValue("購入者").setFontWeight("bold");
     }
     if (currentHeaders.length < 6 || String(currentHeaders[5]).trim() === "") {
       destSheet.getRange(1, 6).setValue("購入日時").setFontWeight("bold");
+    }
+    if (currentHeaders.length < 7 || String(currentHeaders[6]).trim() === "") {
+      destSheet.getRange(1, 7).setValue("速報購入者情報").setFontWeight("bold");
+    }
+    if (currentHeaders.length < 8 || String(currentHeaders[7]).trim() === "") {
+      destSheet.getRange(1, 8).setValue("候補商品マスタNo").setFontWeight("bold");
+    }
+    if (currentHeaders.length < 9 || String(currentHeaders[8]).trim() === "") {
+      destSheet.getRange(1, 9).setValue("仮マスタ商品名").setFontWeight("bold");
     }
   }
 
@@ -72,6 +82,22 @@ function 販売記録CSV照合の更新() {
 
   const masterNoColLetter = getColumnLetter(idxMasterNo);
   const masterNameColLetter = getColumnLetter(idxMasterName);
+
+  // 販売速報（フォーム回答）シート (候補商品マスタNo・購入者情報取得用)
+  let salesBuyerColLetter = null;
+  let salesNoColLetter = null;
+  if (salesSheet) {
+    const salesData = salesSheet.getDataRange().getValues();
+    if (salesData.length > 0) {
+      const salesHeaders = salesData[0].map(h => String(h).trim());
+      const idxSalesBuyer = findHeaderIndex(salesHeaders, ["購入者情報（任意）", "購入者情報", "購入者", "バイヤー", "顧客名", "顧客"]);
+      const idxSalesNo = findHeaderIndex(salesHeaders, ["商品マスタNo", "商品マスタ No", "No", "No."]);
+      if (idxSalesBuyer !== -1 && idxSalesNo !== -1) {
+        salesBuyerColLetter = getColumnLetter(idxSalesBuyer);
+        salesNoColLetter = getColumnLetter(idxSalesNo);
+      }
+    }
+  }
 
   // 3. 既存の登録済みIDの取得
   const destData = destSheet.getDataRange().getValues();
@@ -116,13 +142,16 @@ function 販売記録CSV照合の更新() {
     destSheet.getRange(startRow, 1, valuesToAppend.length, 3).setValues(valuesToAppend);
   }
 
-  // 6. 全データ行の数式（D列・E列・F列）を一括設定・更新
+  // 6. 全データ行の数式（D列〜I列）を一括設定・更新
   const lastRow = destSheet.getLastRow();
   if (lastRow > 1) {
     const dataRangeSize = lastRow - 1; // ヘッダーを除くデータ行数
     const formulasD = [];
     const formulasE = [];
     const formulasF = [];
+    const formulasG = [];
+    const formulasH = [];
+    const formulasI = [];
 
     const srcIdColLetter = getColumnLetter(idxSrcId);
     const srcBuyerColLetter = idxSrcBuyer !== -1 ? getColumnLetter(idxSrcBuyer) : null;
@@ -151,6 +180,29 @@ function 販売記録CSV照合の更新() {
       } else {
         formulasF.push([""]);
       }
+
+      // G列: 速報購入者情報 (購入者E列から「販売速報（フォーム回答）」の購入者情報列を引く)
+      if (salesBuyerColLetter) {
+        formulasG.push([
+          `=XLOOKUP(E${i}, '販売速報（フォーム回答）'!$${salesBuyerColLetter}:$${salesBuyerColLetter}, '販売速報（フォーム回答）'!$${salesBuyerColLetter}:$${salesBuyerColLetter}, "該当なし", 0)`
+        ]);
+      } else {
+        formulasG.push(["該当なし"]);
+      }
+
+      // H列: 候補商品マスタNo (購入者E列から「販売速報（フォーム回答）」の商品マスタNo列を引く)
+      if (salesBuyerColLetter && salesNoColLetter) {
+        formulasH.push([
+          `=XLOOKUP(E${i}, '販売速報（フォーム回答）'!$${salesBuyerColLetter}:$${salesBuyerColLetter}, '販売速報（フォーム回答）'!$${salesNoColLetter}:$${salesNoColLetter}, "該当なし", 0)`
+        ]);
+      } else {
+        formulasH.push(["該当なし"]);
+      }
+
+      // I列: 仮マスタ商品名 (H列の候補商品マスタNoから「商品マスタ_統合」シートを引く)
+      formulasI.push([
+        `=XLOOKUP(H${i}, '商品マスタ_統合'!$${masterNoColLetter}:$${masterNoColLetter}, '商品マスタ_統合'!$${masterNameColLetter}:$${masterNameColLetter}, "-", 0)`
+      ]);
     }
 
     // 数式の書き込み (D列)
@@ -159,12 +211,18 @@ function 販売記録CSV照合の更新() {
     destSheet.getRange(2, 5, dataRangeSize, 1).setFormulas(formulasE);
     // 数式の書き込み (F列)
     destSheet.getRange(2, 6, dataRangeSize, 1).setFormulas(formulasF);
+    // 数式の書き込み (G列)
+    destSheet.getRange(2, 7, dataRangeSize, 1).setFormulas(formulasG);
+    // 数式の書き込み (H列)
+    destSheet.getRange(2, 8, dataRangeSize, 1).setFormulas(formulasH);
+    // 数式の書き込み (I列)
+    destSheet.getRange(2, 9, dataRangeSize, 1).setFormulas(formulasI);
   }
 
   if (newlyAddedCount > 0) {
-    SpreadsheetApp.getUi().alert(`新たに ${newlyAddedCount} 件の商品IDを「販売記録CSV照合表」に追加しました。購入者列等もルックアップ関数で更新しました。`);
+    SpreadsheetApp.getUi().alert(`新たに ${newlyAddedCount} 件の商品IDを「販売記録CSV照合表」に追加しました。購入者列および候補情報（G・H・I列）等も更新しました。`);
   } else {
-    SpreadsheetApp.getUi().alert("新しく登録が必要な商品IDはありませんでした。購入者列等の数式を再設定・更新しました。");
+    SpreadsheetApp.getUi().alert("新しく登録が必要な商品IDはありませんでした。候補情報（G・H・I列）等の数式を再設定・更新しました。");
   }
 }
 

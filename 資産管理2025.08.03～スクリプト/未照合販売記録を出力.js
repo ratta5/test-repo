@@ -3,7 +3,7 @@
  * 商品マスタ No（C列）が「空白」「該当なし」「マスタ未登録」または「数値が入っていない」データを抽出し、
  * 「未照合_販売記録」シートに出力するスクリプト。
  * 
- * 出力項目: 購入日時, 商品ID, 商品名, 商品URL, 購入者
+ * 出力項目: 購入日時, 商品ID, 商品名, 商品URL, 購入者, 入力用_商品マスタNo
  */
 function 未照合販売記録を出力() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -15,9 +15,23 @@ function 未照合販売記録を出力() {
     throw new Error("「販売記録CSV照合表」シートが見つかりません。");
   }
 
-  // 出力先シート「未照合_販売記録」の準備
   const outputSheetName = "未照合_販売記録";
   let outputSheet = ss.getSheetByName(outputSheetName);
+
+  // 再出力前に既存の「入力用_商品マスタNo（F列）」のメモ入力を一時保存して保持する
+  const existingInputMap = new Map(); // id -> inputMemo
+  if (outputSheet && outputSheet.getLastRow() > 1) {
+    const existingData = outputSheet.getDataRange().getValues();
+    for (let i = 1; i < existingData.length; i++) {
+      const id = String(existingData[i][1]).trim(); // B列: 商品ID
+      const memo = existingData[i].length > 5 ? String(existingData[i][5]).trim() : ""; // F列: メモ
+      if (id && memo) {
+        existingInputMap.set(id, memo);
+      }
+    }
+  }
+
+  // シート準備
   if (outputSheet) {
     outputSheet.clearContents();
   } else {
@@ -61,36 +75,49 @@ function 未照合販売記録を出力() {
     }
   }
 
-  // 「販売記録CSV照合表」から未照合（C列が空白、該当なし、数値なし）の行を抽出
+  // 「販売記録CSV照合表」から未照合（商品マスタ No に数値が入っていない）の行を抽出
   const destData = destSheet.getDataRange().getValues();
   if (destData.length <= 1) {
     SpreadsheetApp.getUi().alert("「販売記録CSV照合表」にデータが存在しません。");
     return;
   }
 
-  const outputHeaders = ["購入日時", "商品ID", "商品名", "商品URL", "購入者"];
+  const destHeaders = destData[0].map(h => String(h).trim());
+  const idxDestId = findHeaderIndex(destHeaders, ["商品ID", "商品id", "id", "ID", "商品ＩＤ"]);
+  const idxDestName = findHeaderIndex(destHeaders, ["メルカリ商品名", "商品名", "品名", "タイトル"]);
+  const idxDestMasterNo = findHeaderIndex(destHeaders, ["商品マスタ No", "商品マスタNo", "No", "No."]);
+  const idxDestBuyer = findHeaderIndex(destHeaders, ["購入者", "バイヤー", "顧客名"]);
+  const idxDestDate = findHeaderIndex(destHeaders, ["購入日時", "販売日時", "取引日時", "日時"]);
+
+  const outputHeaders = ["購入日時", "商品ID", "商品名", "商品URL", "購入者", "入力用_商品マスタNo"];
   const outputRows = [outputHeaders];
 
-  // A列: 商品ID (0), B列: メルカリ商品名 (1), C列: 商品マスタ No (2), E列: 購入者 (4), F列: 購入日時 (5)
   for (let i = 1; i < destData.length; i++) {
     const row = destData[i];
-    const id = String(row[0]).trim();
-    const masterNo = row.length > 2 ? row[2] : "";
+    const id = idxDestId !== -1 ? String(row[idxDestId]).trim() : String(row[0]).trim();
+    const masterNo = idxDestMasterNo !== -1 ? row[idxDestMasterNo] : (row.length > 2 ? row[2] : "");
 
     if (id && !isValidMasterNo(masterNo)) {
-      // C列が有効な商品マスタNo（数値含む）でない場合（空白、該当なし、数値なし等）
       const srcInfo = srcMap.get(id);
 
-      const dateStr = srcInfo ? srcInfo.date : (row.length > 5 ? String(row[5]).trim() : "");
-      const name = srcInfo ? srcInfo.name : (row.length > 1 ? String(row[1]).trim() : "");
-      const url = srcInfo ? srcInfo.url : "";
-      const buyer = srcInfo ? srcInfo.buyer : (row.length > 4 ? String(row[4]).trim() : "");
+      const dateStr = srcInfo ? srcInfo.date : (idxDestDate !== -1 ? String(row[idxDestDate]).trim() : (row.length > 5 ? String(row[5]).trim() : ""));
+      const name = srcInfo ? srcInfo.name : (idxDestName !== -1 ? String(row[idxDestName]).trim() : (row.length > 1 ? String(row[1]).trim() : ""));
+      const rawUrl = srcInfo ? srcInfo.url : "";
+      const buyer = srcInfo ? srcInfo.buyer : (idxDestBuyer !== -1 ? String(row[idxDestBuyer]).trim() : (row.length > 4 ? String(row[4]).trim() : ""));
 
-      outputRows.push([dateStr, id, name, url, buyer]);
+      // HYPERLINK数式の作成（URLが存在する場合）
+      const urlFormula = rawUrl && rawUrl.startsWith("http")
+        ? `=HYPERLINK("${rawUrl.replace(/"/g, '""')}", "メルカリで開く ↗")`
+        : rawUrl;
+
+      // 過去入力途中のメモがあれば保持
+      const savedMemo = existingInputMap.get(id) || "";
+
+      outputRows.push([dateStr, id, name, urlFormula, buyer, savedMemo]);
     }
   }
 
-  // シートへ書き込み・装飾
+  // シートへ書き込み
   outputSheet.getRange(1, 1, outputRows.length, outputRows[0].length).setValues(outputRows);
 
   // ヘッダー行のデザイン
@@ -99,15 +126,103 @@ function 未照合販売記録を出力() {
     .setBackground("#f3f3f3");
   outputSheet.setFrozenRows(1);
 
+  // 入力用_商品マスタNo列（F列）の背景色を入力しやすい薄黄色に装飾
+  if (outputRows.length > 1) {
+    outputSheet.getRange(2, 6, outputRows.length - 1, 1)
+      .setBackground("#fffbe6")
+      .setFontWeight("bold");
+  }
+
   // 列幅の自動調整
   outputSheet.autoResizeColumns(1, outputRows[0].length);
 
   const unmappedCount = outputRows.length - 1;
   if (unmappedCount > 0) {
-    SpreadsheetApp.getUi().alert(`未照合（商品マスタNoが空白・該当なし・数値なし）の販売記録 ${unmappedCount} 件を「${outputSheetName}」シートに出力しました。`);
+    SpreadsheetApp.getUi().alert(
+      `未照合の販売記録 ${unmappedCount} 件を「${outputSheetName}」シートに出力しました。\n\n` +
+      `【使い方】\n` +
+      `1. D列「商品URL」のリンクからメルカリ商品ページを開きます。\n` +
+      `2. 確認した商品コードを F列「入力用_商品マスタNo」に入力します。\n` +
+      `3. 上部メニュー「資産管理メニュー ＞ 2. メモしたマスタNoを照合表へ転記」を実行してください。`
+    );
   } else {
     SpreadsheetApp.getUi().alert(`すべての販売記録の照合（商品マスタNoに数値入力）が完了しています。未照合データはありません。`);
   }
+}
+
+/**
+ * 「未照合_販売記録」シートの F列（入力用_商品マスタNo）に入力された値を
+ * 「販売記録CSV照合表」の「商品マスタ No」列へ一括転記するスクリプト
+ */
+function 未照合結果を照合表へ転記() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const unmappedSheet = ss.getSheetByName("未照合_販売記録");
+  const matchSheet = ss.getSheetByName("販売記録CSV照合表");
+
+  if (!unmappedSheet) {
+    throw new Error("「未照合_販売記録」シートが見つかりません。先に「未照合の販売記録を出力」を実行してください。");
+  }
+  if (!matchSheet) {
+    throw new Error("「販売記録CSV照合表」シートが見つかりません。");
+  }
+
+  const unmappedData = unmappedSheet.getDataRange().getValues();
+  if (unmappedData.length <= 1) {
+    SpreadsheetApp.getUi().alert("「未照合_販売記録」シートに転記対象のデータが存在しません。");
+    return;
+  }
+
+  // 未照合シートのヘッダー解析
+  const unmappedHeaders = unmappedData[0].map(h => String(h).trim());
+  const idxUnmappedId = findHeaderIndex(unmappedHeaders, ["商品ID", "商品id", "id", "ID"]);
+  const idxUnmappedMemo = findHeaderIndex(unmappedHeaders, ["入力用_商品マスタNo", "商品マスタNo", "メモ", "コード"]);
+
+  const targetIdCol = idxUnmappedId !== -1 ? idxUnmappedId : 1; // デフォルトB列 (index 1)
+  const targetMemoCol = idxUnmappedMemo !== -1 ? idxUnmappedMemo : 5; // デフォルトF列 (index 5)
+
+  // 1. 入力済みの商品マスタNoをマップ化 (商品ID -> 入力マスタNo)
+  const updateMap = new Map();
+  for (let i = 1; i < unmappedData.length; i++) {
+    const row = unmappedData[i];
+    const id = String(row[targetIdCol]).trim();
+    const memoVal = row.length > targetMemoCol ? String(row[targetMemoCol]).trim() : "";
+
+    // 数値が含まれる有効なマスタNoが入力されているかチェック
+    if (id && isValidMasterNo(memoVal)) {
+      updateMap.set(id, memoVal);
+    }
+  }
+
+  if (updateMap.size === 0) {
+    SpreadsheetApp.getUi().alert("「入力用_商品マスタNo」列に数値（有効な商品マスタNo）が入力されていません。メモ入力後に再度実行してください。");
+    return;
+  }
+
+  // 2. 「販売記録CSV照合表」のヘッダー取得・更新
+  const matchData = matchSheet.getDataRange().getValues();
+  const matchHeaders = matchData[0].map(h => String(h).trim());
+
+  const idxMatchId = findHeaderIndex(matchHeaders, ["商品ID", "商品id", "id", "ID", "商品ＩＤ"]);
+  const idxMatchMasterNo = findHeaderIndex(matchHeaders, ["商品マスタ No", "商品マスタNo", "No", "No."]);
+
+  const destIdCol = idxMatchId !== -1 ? idxMatchId : 0;
+  const destMasterNoCol = idxMatchMasterNo !== -1 ? idxMatchMasterNo : 2;
+
+  let updatedCount = 0;
+  for (let i = 1; i < matchData.length; i++) {
+    const id = String(matchData[i][destIdCol]).trim();
+    if (updateMap.has(id)) {
+      const newMasterNo = updateMap.get(id);
+      matchSheet.getRange(i + 1, destMasterNoCol + 1).setValue(newMasterNo);
+      updatedCount++;
+    }
+  }
+
+  // 3. 転記完了メッセージ & 未照合シートの再更新
+  SpreadsheetApp.getUi().alert(`${updatedCount} 件の商品マスタ No を「販売記録CSV照合表」に転記しました。`);
+
+  // 未照合シートを再抽出して最新化
+  未照合販売記録を出力();
 }
 
 /**
@@ -137,3 +252,4 @@ function findHeaderIndex(headers, candidates) {
   }
   return -1;
 }
+

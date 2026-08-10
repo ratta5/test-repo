@@ -128,7 +128,9 @@ function 推測在庫高の復元() {
   const salesMap = {}; // 商品マスタNo -> 販売履歴リスト
   let maxCsvDate = null; // CSV照合表内の最新購入日時
 
-  // 3-A. 「販売記録CSV照合表」（確定メルカリ売上）の読み込み
+  // 3-A. 「販売記録CSV照合表」（確定メルカリ売上）の読み込み（最優先）
+  const usedMasterNoSet = new Set();
+
   if (matchSheet) {
     const matchData = matchSheet.getDataRange().getValues();
     if (matchData.length > 1) {
@@ -153,6 +155,8 @@ function 推測在庫高の復元() {
               qty: 1 // CSV照合表は1取引1個
             });
 
+            usedMasterNoSet.add(no);
+
             if (!maxCsvDate || sDate > maxCsvDate) {
               maxCsvDate = sDate;
             }
@@ -165,14 +169,13 @@ function 推測在庫高の復元() {
     }
   }
 
-  // 3-B. 「販売速報（フォーム回答）」の読み込み（Amazon売上、自己消費、廃棄、および最新の速報データ）
+  // 3-B. 「販売速報（フォーム回答）」の読み込み（確定CSVに未存在の商品マスタNoのみ補完）
   const salesData = salesSheet.getDataRange().getValues();
   const salesHeaders = salesData[0].map(h => String(h).trim());
 
   const idxSalesNo = findHeaderIndex(salesHeaders, ["商品マスタNo", "商品マスタ No", "No"]);
   const idxSalesDate = findHeaderIndex(salesHeaders, ["販売日", "日付"]);
   const idxSalesQty = findHeaderIndex(salesHeaders, ["販売数", "数量"]);
-  const idxSalesBuyer = findHeaderIndex(salesHeaders, ["購入者情報（任意）", "購入者情報", "購入者", "バイヤー", "顧客名", "顧客", "備考", "理由", "用途", "チャネル"]);
 
   if (idxSalesNo === -1 || idxSalesDate === -1 || idxSalesQty === -1) {
     throw new Error("「販売速報（フォーム回答）」に必要な列が見つかりません。必須列: 商品マスタNo, 販売日, 販売数");
@@ -181,7 +184,9 @@ function 推測在庫高の復元() {
   for (let i = 1; i < salesData.length; i++) {
     const row = salesData[i];
     const no = String(row[idxSalesNo]).trim();
-    if (!no) continue;
+
+    // 商品マスタNoが無効、またはすでに確定CSV（または処理済みの速報）で採用済みの場合はスキップ
+    if (!no || !isValidMasterNo(no) || usedMasterNoSet.has(no)) continue;
 
     const rawDate = row[idxSalesDate];
     const salesDate = parseDate(rawDate);
@@ -189,29 +194,18 @@ function 推測在庫高の復元() {
 
     if (!salesDate) continue;
 
-    const buyerInfo = idxSalesBuyer !== -1 ? String(row[idxSalesBuyer]).trim() : "";
-    const isNonMercari = buyerInfo.includes("Amazon") || buyerInfo.includes("amazon") ||
-                          buyerInfo.includes("自己消費") || buyerInfo.includes("廃棄") ||
-                          buyerInfo.includes("損買") || buyerInfo.includes("他販路");
+    if (!salesMap[no]) {
+      salesMap[no] = [];
+    }
+    salesMap[no].push({
+      date: salesDate,
+      qty: qty
+    });
 
-    // 判定ルール (Solution B):
-    // 1. 最新期間（salesDate > maxCsvDate）は全件採用（最新の速報売上）
-    // 2. 過去期間（salesDate <= maxCsvDate）であっても、Amazon・自己消費・廃棄（isNonMercari）は全件採用
-    // 3. 過去期間のメルカリ売上はCSV照合表側で集計済みのため重複防止でスキップ
-    const shouldInclude = !maxCsvDate || salesDate > maxCsvDate || isNonMercari;
+    usedMasterNoSet.add(no);
 
-    if (shouldInclude) {
-      if (!salesMap[no]) {
-        salesMap[no] = [];
-      }
-      salesMap[no].push({
-        date: salesDate,
-        qty: qty
-      });
-
-      if (salesDate < minDate) {
-        minDate = new Date(salesDate);
-      }
+    if (salesDate < minDate) {
+      minDate = new Date(salesDate);
     }
   }
 
@@ -490,9 +484,14 @@ function 推測在庫高の復元() {
  * 候補リストから一致するヘッダーのインデックスを返す
  */
 function findHeaderIndex(headers, candidates) {
-  for (let cand of candidates) {
-    const idx = headers.indexOf(cand);
-    if (idx !== -1) return idx;
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i].toLowerCase();
+    for (let j = 0; j < candidates.length; j++) {
+      const cand = candidates[j].toLowerCase();
+      if (h === cand || h.includes(cand)) {
+        return i;
+      }
+    }
   }
   return -1;
 }

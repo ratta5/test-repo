@@ -11,6 +11,7 @@ function 推測在庫高の復元() {
   const masterSheet = ss.getSheetByName("商品マスタ_統合");
   const inventorySheet = ss.getSheetByName("棚卸_取り込み");
   const salesSheet = ss.getSheetByName("販売速報（フォーム回答）");
+  const matchSheet = ss.getSheetByName("販売記録CSV照合表");
   const outputSheetName = "推測在庫高_推移";
 
   if (!masterSheet) {
@@ -123,19 +124,59 @@ function 推測在庫高の復元() {
     }
   }
 
-  // --- 3. 販売速報（フォーム回答）の読み込み ---
+  // --- 3. 販売データの統合（Solution B: 確定CSV照合表 ＋ フォーム回答） ---
+  const salesMap = {}; // 商品マスタNo -> 販売履歴リスト
+  let maxCsvDate = null; // CSV照合表内の最新購入日時
+
+  // 3-A. 「販売記録CSV照合表」（確定メルカリ売上）の読み込み
+  if (matchSheet) {
+    const matchData = matchSheet.getDataRange().getValues();
+    if (matchData.length > 1) {
+      const matchHeaders = matchData[0].map(h => String(h).trim());
+      const idxMatchNo = findHeaderIndex(matchHeaders, ["商品マスタ No", "商品マスタNo", "No"]);
+      const idxMatchDate = findHeaderIndex(matchHeaders, ["購入日時", "販売日時", "日付"]);
+
+      if (idxMatchNo !== -1 && idxMatchDate !== -1) {
+        for (let i = 1; i < matchData.length; i++) {
+          const row = matchData[i];
+          const no = String(row[idxMatchNo]).trim();
+          const rawDate = row[idxMatchDate];
+          const sDate = parseDate(rawDate);
+
+          // 有効な商品マスタNoかつ日付が存在する場合
+          if (no && isValidMasterNo(no) && sDate) {
+            if (!salesMap[no]) {
+              salesMap[no] = [];
+            }
+            salesMap[no].push({
+              date: sDate,
+              qty: 1 // CSV照合表は1取引1個
+            });
+
+            if (!maxCsvDate || sDate > maxCsvDate) {
+              maxCsvDate = sDate;
+            }
+            if (sDate < minDate) {
+              minDate = new Date(sDate);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3-B. 「販売速報（フォーム回答）」の読み込み（Amazon売上、自己消費、廃棄、および最新の速報データ）
   const salesData = salesSheet.getDataRange().getValues();
   const salesHeaders = salesData[0].map(h => String(h).trim());
 
   const idxSalesNo = findHeaderIndex(salesHeaders, ["商品マスタNo", "商品マスタ No", "No"]);
   const idxSalesDate = findHeaderIndex(salesHeaders, ["販売日", "日付"]);
   const idxSalesQty = findHeaderIndex(salesHeaders, ["販売数", "数量"]);
+  const idxSalesBuyer = findHeaderIndex(salesHeaders, ["購入者情報（任意）", "購入者情報", "購入者", "バイヤー", "顧客名", "顧客", "備考", "理由", "用途", "チャネル"]);
 
   if (idxSalesNo === -1 || idxSalesDate === -1 || idxSalesQty === -1) {
     throw new Error("「販売速報（フォーム回答）」に必要な列が見つかりません。必須列: 商品マスタNo, 販売日, 販売数");
   }
-
-  const salesMap = {}; // 商品マスタNo -> 販売履歴リスト
 
   for (let i = 1; i < salesData.length; i++) {
     const row = salesData[i];
@@ -148,16 +189,29 @@ function 推測在庫高の復元() {
 
     if (!salesDate) continue;
 
-    if (!salesMap[no]) {
-      salesMap[no] = [];
-    }
-    salesMap[no].push({
-      date: salesDate,
-      qty: qty
-    });
+    const buyerInfo = idxSalesBuyer !== -1 ? String(row[idxSalesBuyer]).trim() : "";
+    const isNonMercari = buyerInfo.includes("Amazon") || buyerInfo.includes("amazon") ||
+                          buyerInfo.includes("自己消費") || buyerInfo.includes("廃棄") ||
+                          buyerInfo.includes("損買") || buyerInfo.includes("他販路");
 
-    if (salesDate < minDate) {
-      minDate = new Date(salesDate);
+    // 判定ルール (Solution B):
+    // 1. 最新期間（salesDate > maxCsvDate）は全件採用（最新の速報売上）
+    // 2. 過去期間（salesDate <= maxCsvDate）であっても、Amazon・自己消費・廃棄（isNonMercari）は全件採用
+    // 3. 過去期間のメルカリ売上はCSV照合表側で集計済みのため重複防止でスキップ
+    const shouldInclude = !maxCsvDate || salesDate > maxCsvDate || isNonMercari;
+
+    if (shouldInclude) {
+      if (!salesMap[no]) {
+        salesMap[no] = [];
+      }
+      salesMap[no].push({
+        date: salesDate,
+        qty: qty
+      });
+
+      if (salesDate < minDate) {
+        minDate = new Date(salesDate);
+      }
     }
   }
 
@@ -481,3 +535,15 @@ function parseNumber(val) {
   }
   return 0;
 }
+
+/**
+ * 商品マスタ No が有効な数値/IDであるか判定
+ */
+function isValidMasterNo(val) {
+  if (val === null || val === undefined) return false;
+  const str = String(val).trim();
+  if (str === "" || str === "-" || str === "0") return false;
+  if (str.includes("該当なし") || str.includes("未登録") || str.includes("不明")) return false;
+  return /\d/.test(str);
+}
+

@@ -1,42 +1,54 @@
 /**
  * 過去の推測在庫高を復元・推定するスクリプト
  * 
- * 最新の実地棚卸データを基準点とし、仕入（商品マスタ）と販売（販売速報）のデータから
- * 過去の各月末時点における「推測在庫数」を逆算し、仕入単価を掛けて「推測在庫高」を算出します。
+ * 最新の実地棚卸データを基準点（ベースライン）とし、仕入（商品マスタ）と販売（販売速報・照合表）のデータから
+ * 過去および今後の各月末時点における「推測在庫数」および「推測在庫高」を段階的に算出します。
+ */
+
+/**
+ * メインエントリーポイント：ステップ1（データ取得・準備）とステップ2（計算・出力）を順次実行
  */
 function 推測在庫高の復元() {
+  Logger.log("=== 推測在庫高の復元 処理開始 ===");
+  
+  // ステップ1: データの取得・正規化・棚卸ベースラインの紐付け
+  const preparedData = step1_fetchAndPrepareData();
+  
+  // ステップ2: 月次在庫推移の計算とシート出力
+  step2_calculateAndOutputStockHistory(preparedData);
+
+  SpreadsheetApp.getUi().alert(
+    "推測在庫高の復元が完了しました。\n" +
+    "「推測在庫高_推移」および「推測在庫_商品別推移」シートに出力されました。"
+  );
+  Logger.log("=== 推測在庫高の復元 処理完了 ===");
+}
+
+/**
+ * 【ステップ1】スプレッドシートからデータを取得・正規化し、棚卸ベースラインと紐づける
+ * 
+ * @returns {Object} 準備されたデータオブジェクト
+ */
+function step1_fetchAndPrepareData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
   // 対象シートの取得
   const masterSheet = ss.getSheetByName("商品マスタ_統合");
-  const inventorySheet = ss.getSheetByName("棚卸_取り込み");
   const salesSheet = ss.getSheetByName("販売速報（フォーム回答）");
   const matchSheet = ss.getSheetByName("販売記録CSV照合表");
-  const outputSheetName = "推測在庫高_推移";
 
   if (!masterSheet) {
     throw new Error("「商品マスタ_統合」シートが見つかりません。");
   }
-  if (!inventorySheet) {
-    throw new Error("「棚卸_取り込み」シートが見つかりません。");
-  }
   if (!salesSheet) {
     throw new Error("「販売速報（フォーム回答）」シートが見つかりません。");
-  }
-
-  // 出力シートの準備
-  let outputSheet = ss.getSheetByName(outputSheetName);
-  if (outputSheet) {
-    outputSheet.clearContents();
-  } else {
-    outputSheet = ss.insertSheet(outputSheetName);
   }
 
   // --- 1. 商品マスタ_統合の読み込み ---
   const masterData = masterSheet.getDataRange().getValues();
   const masterHeaders = masterData[0].map(h => String(h).trim());
   
-  const idxMasterNo = findHeaderIndex(masterHeaders, ["商品マスタ No", "商品マスタNo", "No", "No."]);
+  const idxMasterNo = findHeaderIndex(masterHeaders, ["商品マスタ No", "商品マスタNo", "商品マスタ", "No", "No.", "コード", "商品コード", "ID", "商品ID", "マスタNo", "品番"]);
   const idxPurchaseDate = findHeaderIndex(masterHeaders, ["仕入日", "購入日"]);
   const idxUnitPrice = findHeaderIndex(masterHeaders, ["実質仕入額(単品)", "仕入評価額", "単価"]);
   const idxPurchaseQty = findHeaderIndex(masterHeaders, ["購入数", "数量"]);
@@ -47,13 +59,14 @@ function 推測在庫高の復元() {
     throw new Error("「商品マスタ_統合」に必要な列が見つかりません。必須列: 商品マスタ No, 仕入日, 実質仕入額(単品), 購入数");
   }
 
-  const productsMap = {}; // 商品マスタNo -> 商品情報
+  const productsMap = {}; // 正規化マスタNo -> 商品情報
   let minDate = new Date(); // データ全体の最古日付（逆算の開始月判定用）
 
   for (let i = 1; i < masterData.length; i++) {
     const row = masterData[i];
-    const no = String(row[idxMasterNo]).trim();
-    if (!no) continue;
+    const rawNo = row[idxMasterNo];
+    const normNo = normalizeMasterNo(rawNo);
+    if (!normNo) continue;
 
     const rawDate = row[idxPurchaseDate];
     const purchaseDate = parseDate(rawDate);
@@ -75,8 +88,9 @@ function 推測在庫高の復元() {
     const unitPrice = parseAmount(row[idxUnitPrice]);
     const name = idxProductName !== -1 ? String(row[idxProductName]).trim() : "";
 
-    productsMap[no] = {
-      no: no,
+    productsMap[normNo] = {
+      no: normNo,
+      originalNo: String(rawNo).trim(),
       purchaseDate: purchaseDate,
       unitPrice: unitPrice,
       purchaseQty: purchaseQty,
@@ -90,47 +104,113 @@ function 推測在庫高の復元() {
     }
   }
 
-  // --- 2. 棚卸_取り込みの読み込み ---
-  const inventoryData = inventorySheet.getDataRange().getValues();
-  const inventoryHeaders = inventoryData[0].map(h => String(h).trim());
+  // --- 2. 棚卸シートの柔軟な読み込み（「棚卸_最新」「棚卸_取り込み」「棚卸」を順次検索） ---
+  const candidateSheetNames = ["棚卸_最新", "棚卸_取り込み", "棚卸"];
+  let chosenSheetName = "";
+  let inventoryMap = {};
+  let latestInventoryDate = null;
+  let totalTargetAmount = null; // 総額表記（例: ¥37,097）が存在する場合
+  let matchCount = 0;
 
-  const idxInvNo = findHeaderIndex(inventoryHeaders, ["商品マスタ No", "商品マスタNo"]);
-  const idxInvDate = findHeaderIndex(inventoryHeaders, ["棚卸日", "日付"]);
-  const idxInvQty = findHeaderIndex(inventoryHeaders, ["実在庫", "在庫数", "数量"]);
+  for (const sheetName of candidateSheetNames) {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) continue;
 
-  if (idxInvNo === -1 || idxInvDate === -1 || idxInvQty === -1) {
-    throw new Error("「棚卸_取り込み」に必要な列が見つかりません。必須列: 商品マスタ No, 棚卸日, 実在庫");
-  }
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) continue;
 
-  const inventoryMap = {}; // 商品マスタNo -> 最新の棚卸情報
+    // ヘッダー行を先頭10行の中から自動検索
+    let headerRowIdx = -1;
+    let idxNo = -1, idxDate = -1, idxQty = -1, idxAmount = -1;
 
-  for (let i = 1; i < inventoryData.length; i++) {
-    const row = inventoryData[i];
-    const no = String(row[idxInvNo]).trim();
-    if (!no) continue;
+    for (let r = 0; r < Math.min(data.length, 10); r++) {
+      const headers = data[r].map(h => String(h).trim());
+      const testNo = findHeaderIndex(headers, ["商品マスタ No", "商品マスタNo", "商品マスタ", "No", "No.", "コード", "商品コード", "ID", "商品ID", "マスタNo", "品番"]);
+      const testQty = findHeaderIndex(headers, ["実在庫", "在庫数", "数量", "実在庫数", "在庫", "棚卸数", "棚卸数量", "現品", "個数", "棚卸在庫"]);
+      const testDate = findHeaderIndex(headers, ["棚卸日", "日付", "実施日", "年月日", "調査日"]);
+      const testAmount = findHeaderIndex(headers, ["実在庫額総額", "実在庫額", "在庫額", "棚卸高", "総額", "金額"]);
 
-    const rawDate = row[idxInvDate];
-    const invDate = parseDate(rawDate);
-    const qty = parseNumber(row[idxInvQty]);
+      if (testNo !== -1 || testQty !== -1 || testAmount !== -1) {
+        headerRowIdx = r;
+        idxNo = testNo;
+        idxQty = testQty;
+        idxDate = testDate;
+        idxAmount = testAmount;
+        break;
+      }
+    }
 
-    if (!invDate) continue;
+    if (headerRowIdx === -1) continue;
 
-    // 同一商品で複数の棚卸データがある場合は、最新のものを採用
-    if (!inventoryMap[no] || invDate > inventoryMap[no].date) {
-      inventoryMap[no] = {
-        date: invDate,
-        qty: qty
-      };
+    const tempMap = {};
+    let tempMaxDate = null;
+    let currentMatchCount = 0;
+
+    for (let i = headerRowIdx + 1; i < data.length; i++) {
+      const row = data[i];
+      if (!row || row.length === 0) continue;
+
+      const rawNo = idxNo !== -1 ? row[idxNo] : null;
+      const normNo = normalizeMasterNo(rawNo);
+      
+      const rawDate = idxDate !== -1 ? row[idxDate] : null;
+      const invDate = parseDate(rawDate) || new Date("2026-07-31");
+      
+      if (normNo && productsMap[normNo]) {
+        const qty = idxQty !== -1 ? parseNumber(row[idxQty]) : 0;
+        if (!tempMap[normNo] || invDate > tempMap[normNo].date) {
+          tempMap[normNo] = { date: invDate, qty: qty };
+        }
+        if (!tempMaxDate || invDate > tempMaxDate) {
+          tempMaxDate = invDate;
+        }
+        currentMatchCount++;
+      }
+
+      // 単一行の総額指定チェック（例: ¥37,097）
+      if (idxAmount !== -1) {
+        const amt = parseAmount(row[idxAmount]);
+        if (amt > 0) {
+          totalTargetAmount = amt;
+          if (invDate) tempMaxDate = invDate;
+        }
+      }
+    }
+
+    if (currentMatchCount > 0) {
+      chosenSheetName = sheetName;
+      inventoryMap = tempMap;
+      latestInventoryDate = tempMaxDate;
+      matchCount = currentMatchCount;
+      Logger.log(`棚卸シート「${sheetName}」から ${matchCount} 件の商品明細が商品マスタと一致しました。`);
+      break;
+    } else if (totalTargetAmount > 0 && !chosenSheetName) {
+      chosenSheetName = sheetName;
+      latestInventoryDate = tempMaxDate || new Date("2026-07-31");
     }
   }
 
-  // --- 3. 販売データの統合（Solution B: 確定CSV照合表 ＋ フォーム回答） ---
-  const salesMap = {}; // 商品マスタNo -> 販売履歴リスト
-  let maxCsvDate = null; // CSV照合表内の最新購入日時
+  // ★安全なベースライン補正★
+  // 明細の一致件数が1件以上ある場合のみ、未記載商品を「棚卸日時点で0個」として補正する
+  if (matchCount > 0 && latestInventoryDate) {
+    Object.keys(productsMap).forEach(normNo => {
+      const prod = productsMap[normNo];
+      if (!inventoryMap[normNo] && prod.purchaseDate <= latestInventoryDate) {
+        inventoryMap[normNo] = {
+          date: latestInventoryDate,
+          qty: 0
+        };
+      }
+    });
+  } else {
+    Logger.log(`[情報] 棚卸明細と商品マスタIDの直接一致数が0件のため、仕入・販売履歴からの推定計算を使用します。総額目標: ${totalTargetAmount || "なし"}`);
+  }
 
-  // 3-A. 「販売記録CSV照合表」（確定メルカリ売上）の読み込み（最優先）
+  // --- 3. 販売データの統合（確定CSV照合表 ＋ フォーム回答） ---
+  const salesMap = {}; // 正規化マスタNo -> 販売履歴リスト
   const usedMasterNoSet = new Set();
 
+  // 3-A. 「販売記録CSV照合表」（確定メルカリ売上）の読み込み（最優先）
   if (matchSheet) {
     const matchData = matchSheet.getDataRange().getValues();
     if (matchData.length > 1) {
@@ -141,25 +221,22 @@ function 推測在庫高の復元() {
       if (idxMatchNo !== -1 && idxMatchDate !== -1) {
         for (let i = 1; i < matchData.length; i++) {
           const row = matchData[i];
-          const no = String(row[idxMatchNo]).trim();
+          const rawNo = row[idxMatchNo];
+          const normNo = normalizeMasterNo(rawNo);
           const rawDate = row[idxMatchDate];
           const sDate = parseDate(rawDate);
 
-          // 有効な商品マスタNoかつ日付が存在する場合
-          if (no && isValidMasterNo(no) && sDate) {
-            if (!salesMap[no]) {
-              salesMap[no] = [];
+          if (normNo && isValidMasterNo(normNo) && sDate) {
+            if (!salesMap[normNo]) {
+              salesMap[normNo] = [];
             }
-            salesMap[no].push({
+            salesMap[normNo].push({
               date: sDate,
               qty: 1 // CSV照合表は1取引1個
             });
 
-            usedMasterNoSet.add(no);
+            usedMasterNoSet.add(normNo);
 
-            if (!maxCsvDate || sDate > maxCsvDate) {
-              maxCsvDate = sDate;
-            }
             if (sDate < minDate) {
               minDate = new Date(sDate);
             }
@@ -183,10 +260,10 @@ function 推測在庫高の復元() {
 
   for (let i = 1; i < salesData.length; i++) {
     const row = salesData[i];
-    const no = String(row[idxSalesNo]).trim();
+    const rawNo = row[idxSalesNo];
+    const normNo = normalizeMasterNo(rawNo);
 
-    // 商品マスタNoが無効、またはすでに確定CSV（または処理済みの速報）で採用済みの場合はスキップ
-    if (!no || !isValidMasterNo(no) || usedMasterNoSet.has(no)) continue;
+    if (!normNo || !isValidMasterNo(normNo) || usedMasterNoSet.has(normNo)) continue;
 
     const rawDate = row[idxSalesDate];
     const salesDate = parseDate(rawDate);
@@ -194,23 +271,58 @@ function 推測在庫高の復元() {
 
     if (!salesDate) continue;
 
-    if (!salesMap[no]) {
-      salesMap[no] = [];
+    if (!salesMap[normNo]) {
+      salesMap[normNo] = [];
     }
-    salesMap[no].push({
+    salesMap[normNo].push({
       date: salesDate,
       qty: qty
     });
 
-    usedMasterNoSet.add(no);
+    usedMasterNoSet.add(normNo);
 
     if (salesDate < minDate) {
       minDate = new Date(salesDate);
     }
   }
 
-  // --- 4. 期間の設定 ---
-  // 開始月はデータ上の最古の日付（仕入または販売）の月初めとする
+  // --- 検証・サマリー出力 ---
+  const totalMasterCount = Object.keys(productsMap).length;
+  let matchedInventoryCount = 0;
+  Object.keys(productsMap).forEach(normNo => {
+    if (inventoryMap[normNo] && inventoryMap[normNo].qty > 0) matchedInventoryCount++;
+  });
+
+  Logger.log(`[Step 1 完了] 有効商品数: ${totalMasterCount}, 棚卸有在庫数: ${matchedInventoryCount}, 採用シート: ${chosenSheetName || "なし"}, 最新棚卸日: ${latestInventoryDate ? Utilities.formatDate(latestInventoryDate, Session.getScriptTimeZone(), "yyyy/MM/dd") : "なし"}`);
+
+  return {
+    ss: ss,
+    productsMap: productsMap,
+    inventoryMap: inventoryMap,
+    salesMap: salesMap,
+    minDate: minDate,
+    totalTargetAmount: totalTargetAmount,
+    latestInventoryDate: latestInventoryDate
+  };
+}
+
+/**
+ * 【ステップ2】月次推移の計算とシートへの出力
+ * 
+ * @param {Object} preparedData ステップ1で準備されたデータ
+ */
+function step2_calculateAndOutputStockHistory(preparedData) {
+  const { ss, productsMap, inventoryMap, salesMap, minDate, totalTargetAmount, latestInventoryDate } = preparedData;
+
+  const outputSheetName = "推測在庫高_推移";
+  let outputSheet = ss.getSheetByName(outputSheetName);
+  if (outputSheet) {
+    outputSheet.clearContents();
+  } else {
+    outputSheet = ss.insertSheet(outputSheetName);
+  }
+
+  // --- 期間の設定 ---
   const startYear = minDate.getFullYear();
   const startMonth = minDate.getMonth(); // 0-11
   
@@ -236,7 +348,7 @@ function 推測在庫高の復元() {
     }
   }
 
-  // --- 5. 月別の逆算・集計処理 ---
+  // --- 月別の逆算・集計処理 ---
   const resultRows = [];
   
   months.forEach(m => {
@@ -271,13 +383,12 @@ function 推測在庫高の復元() {
       let stockQty = 0;
 
       if (inv) {
-        // 棚卸データがある場合
+        // 棚卸ベースラインデータがある場合
         const invDate = inv.date;
         const invQty = inv.qty;
 
         if (monthEndDate.getTime() < invDate.getTime()) {
           // 月末が棚卸日より「過去」の場合: 過去へ逆算
-          // 在庫 = 棚卸実在庫 - (月末から棚卸日までの仕入) + (月末から棚卸日までの販売)
           let periodPurchase = 0;
           if (prod.purchaseDate && prod.purchaseDate > monthEndDate && prod.purchaseDate <= invDate) {
             periodPurchase = prod.purchaseQty;
@@ -293,7 +404,6 @@ function 推測在庫高の復元() {
           stockQty = invQty - periodPurchase + periodSales;
         } else {
           // 月末が棚卸日より「未来または同時点」の場合: 未来へ順算
-          // 在庫 = 棚卸実在庫 + (棚卸日から月末までの仕入) - (棚卸日から月末までの販売)
           let periodPurchase = 0;
           if (prod.purchaseDate && prod.purchaseDate > invDate && prod.purchaseDate <= monthEndDate) {
             periodPurchase = prod.purchaseQty;
@@ -310,7 +420,6 @@ function 推測在庫高の復元() {
         }
       } else {
         // 棚卸データがない場合: 仕入日と販売履歴から単純計算
-        // 在庫 = (月末までに仕入れた数) - (月末までに販売した数)
         let periodPurchase = 0;
         if (prod.purchaseDate && prod.purchaseDate <= monthEndDate) {
           periodPurchase = prod.purchaseQty;
@@ -344,7 +453,7 @@ function 推測在庫高の復元() {
     ]);
   });
 
-  // --- 6. 結果 of シート出力 ---
+  // --- 6. 結果のシート出力 ---
   const outputData = [
     ["年月", "当月仕入額", "当月販売原価", "月末推測在庫高"]
   ];
@@ -392,7 +501,7 @@ function 推測在庫高の復元() {
   Object.keys(productsMap).sort().forEach(no => {
     const prod = productsMap[no];
     const row = [
-      prod.no,
+      prod.originalNo || prod.no,
       prod.name,
       prod.purchaseDate ? Utilities.formatDate(prod.purchaseDate, Session.getScriptTimeZone(), "yyyy/MM/dd") : "",
       prod.unitPrice,
@@ -474,10 +583,7 @@ function 推測在庫高の復元() {
     prodSheet.getRange(2, 2, prodOutputData.length - 1, 1).setWrap(true);
   }
 
-  SpreadsheetApp.getUi().alert(
-    "推測在庫高の復元が完了しました。\n" +
-    "「" + outputSheetName + "」および「" + productOutputSheetName + "」シートに出力されました。"
-  );
+  Logger.log("[Step 2 完了] シート出力完了");
 }
 
 /**
@@ -509,7 +615,6 @@ function parseDate(val) {
   if (isNaN(d.getTime())) return null;
   return d >= minValidDate ? d : null;
 }
-
 
 /**
  * 金額数値のパース
@@ -546,3 +651,18 @@ function isValidMasterNo(val) {
   return /\d/.test(str);
 }
 
+/**
+ * 商品マスタNoの正規化関数（型・全角半角・前後の空白などの差異を吸収）
+ */
+function normalizeMasterNo(val) {
+  if (val === null || val === undefined) return "";
+  let str = String(val).trim();
+  if (str === "" || str === "-" || str === "0") return "";
+  // 全角数字を半角数字に変換
+  str = str.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xfee0));
+  // 浮動小数点表記（例: 101.0）の小数点以下を削除
+  if (/^\d+\.0+$/.test(str)) {
+    str = str.split(".")[0];
+  }
+  return str;
+}

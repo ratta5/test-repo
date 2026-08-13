@@ -4,7 +4,7 @@ function 口座別余力() {
   const repaymentSheet = ss.getSheetByName("口座別カード返済集計");
   const masterSheet = ss.getSheetByName("カードマスター");
   const paymentSheet = ss.getSheetByName("カード返済額_整形");
-  const inventorySheet = ss.getSheetByName("棚卸_取り込み");
+  const inventorySheet = ss.getSheetByName("棚卸_最新") || ss.getSheetByName("棚卸_取り込み") || ss.getSheetByName("棚卸");
   const outputSheetName = "口座別余力";
 
   // 出力シート準備

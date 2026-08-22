@@ -9,7 +9,7 @@ function 推測在庫高の復元() {
   
   // 対象シートの取得
   const masterSheet = ss.getSheetByName("商品マスタ_統合");
-  const inventorySheet = ss.getSheetByName("棚卸_取り込み");
+  const inventorySheet = ss.getSheetByName("棚卸_最新") || ss.getSheetByName("棚卸_取り込み");
   const salesSheet = ss.getSheetByName("販売速報（フォーム回答）");
   const outputSheetName = "推測在庫高_推移";
 
@@ -17,7 +17,7 @@ function 推測在庫高の復元() {
     throw new Error("「商品マスタ_統合」シートが見つかりません。");
   }
   if (!inventorySheet) {
-    throw new Error("「棚卸_取り込み」シートが見つかりません。");
+    throw new Error("「棚卸_最新」（または「棚卸_取り込み」）シートが見つかりません。");
   }
   if (!salesSheet) {
     throw new Error("「販売速報（フォーム回答）」シートが見つかりません。");
@@ -98,7 +98,7 @@ function 推測在庫高の復元() {
   const idxInvQty = findHeaderIndex(inventoryHeaders, ["実在庫", "在庫数", "数量"]);
 
   if (idxInvNo === -1 || idxInvDate === -1 || idxInvQty === -1) {
-    throw new Error("「棚卸_取り込み」に必要な列が見つかりません。必須列: 商品マスタ No, 棚卸日, 実在庫");
+    throw new Error("「棚卸_最新」に必要な列が見つかりません。必須列: 商品マスタ No, 棚卸日, 実在庫");
   }
 
   const inventoryMap = {}; // 商品マスタNo -> 最新の棚卸情報

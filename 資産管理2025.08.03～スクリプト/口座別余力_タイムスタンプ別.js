@@ -206,6 +206,27 @@ function 口座別余力_タイムスタンプ別() {
     outputSheet.getRange(2, 2, result.length - 1, result[0].length - 1).setNumberFormat('"¥"#,##0');
   }
 
-  // 列幅自動調節
+  // タイトルが確実に表示される列幅調整
+  function calculateTitleWidth(text) {
+    if (!text) return 60;
+    const str = String(text);
+    let w = 0;
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if ((code >= 0x3000 && code <= 0x9fff) || (code >= 0xff01 && code <= 0xff60)) {
+        w += 14.5;
+      } else {
+        w += 8.5;
+      }
+    }
+    return Math.ceil(w + 24);
+  }
+
   outputSheet.autoResizeColumns(1, result[0].length);
+  for (let col = 1; col <= result[0].length; col++) {
+    const autoW = outputSheet.getColumnWidth(col);
+    const headerTitle = result[0][col - 1];
+    const minTitleW = calculateTitleWidth(headerTitle);
+    outputSheet.setColumnWidth(col, Math.max(autoW + 8, minTitleW));
+  }
 }

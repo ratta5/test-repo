@@ -135,6 +135,14 @@ function 未照合販売記録を出力() {
 
   // 列幅の自動調整
   outputSheet.autoResizeColumns(1, outputRows[0].length);
+  // 商品名（3列目/C列）が広くなりすぎるのを防ぐため、適正幅（250px）に設定
+  outputSheet.setColumnWidth(3, 250);
+
+  // 垂直方向中央揃え & 商品名の折り返し設定
+  outputSheet.getRange(1, 1, outputRows.length, outputRows[0].length).setVerticalAlignment("middle");
+  if (outputRows.length > 1) {
+    outputSheet.getRange(2, 3, outputRows.length - 1, 1).setWrap(true);
+  }
 
   const unmappedCount = outputRows.length - 1;
   if (unmappedCount > 0) {

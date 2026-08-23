@@ -9,8 +9,12 @@ const DEST_WRITE_START_COL = 2;
 /** メニュー */
 function onOpen() {
   SpreadsheetApp.getUi()
-    .createMenu('商品集約')
-    .addItem('今すぐ更新', '商品マスタ更新')
+    .createMenu('仕入・商品管理')
+    .addItem('★シミュレーター全商品を履歴に一括保存', 'シミュレーター全商品を履歴に一括保存')
+    .addItem('シミュレーターを一括クリア', 'シミュレーターを一括クリア')
+    .addSeparator()
+    .addItem('商品マスタ今すぐ更新', '商品マスタ更新')
+    .addItem('仕入試算シートを新規作成/初期化', '仕入試算シート作成')
     .addToUi();
 }
 

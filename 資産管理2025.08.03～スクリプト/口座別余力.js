@@ -4,6 +4,7 @@ function 口座別余力() {
   const repaymentSheet = ss.getSheetByName("口座別カード返済集計");
   const masterSheet = ss.getSheetByName("カードマスター");
   const paymentSheet = ss.getSheetByName("カード返済額_整形");
+  const sourcePaymentSheet = ss.getSheetByName("カード返済額");
   const inventorySheet = ss.getSheetByName("棚卸_最新") || ss.getSheetByName("棚卸_取り込み") || ss.getSheetByName("棚卸");
   const outputSheetName = "口座別余力";
 
@@ -33,6 +34,76 @@ function 口座別余力() {
   const nextMonthDate = new Date(latestMonthDate);
   nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
   const nextMonthStr = Utilities.formatDate(nextMonthDate, Session.getScriptTimeZone(), "yyyy-MM");
+
+  // 真偽値（振込済か）判定関数
+  function checkIsPaid(val) {
+    if (val === true || val === 1) return true;
+    if (typeof val === "string") {
+      const s = val.trim().toUpperCase();
+      return (s === "TRUE" || s === "済" || s === "OK" || s === "1" || s === "✓" || s === "✔");
+    }
+    return false;
+  }
+
+  // --- カード返済額シートから「ngs振込済」ステータスを月別に取得 ---
+  const ngsPaidStatusByMonth = {};
+  let latestRowIsPaid = false;
+
+  if (sourcePaymentSheet) {
+    const rawPaymentData = sourcePaymentSheet.getDataRange().getValues();
+    if (rawPaymentData.length > 1) {
+      const rawHeaders = rawPaymentData[0];
+
+      // 1. 列の特定（ngs振込済、振込済、またはngs列の隣、またはV列/22列目）
+      let paidColIdx = rawHeaders.findIndex(h => {
+        const str = String(h).trim();
+        return str.includes("ngs振込") || str.includes("振込済") || str.includes("振込完了") || str.includes("ngs返済振込");
+      });
+
+      if (paidColIdx === -1) {
+        // ngs返済次月などの列を探し、その次の列（右隣）を対象とする
+        const ngsColIdx = rawHeaders.findIndex(h => String(h).includes("ngs"));
+        if (ngsColIdx !== -1 && ngsColIdx + 1 < rawHeaders.length) {
+          paidColIdx = ngsColIdx + 1;
+        } else if (rawHeaders.length >= 22) {
+          paidColIdx = 21; // V列（0-indexedで21）
+        } else {
+          paidColIdx = rawHeaders.length;
+        }
+      }
+
+      // ヘッダー名が空なら「ngs振込済」を設定
+      const currentHeaderVal = sourcePaymentSheet.getRange(1, paidColIdx + 1).getValue();
+      if (!currentHeaderVal || String(currentHeaderVal).trim() === "") {
+        sourcePaymentSheet.getRange(1, paidColIdx + 1).setValue("ngs振込済");
+      }
+
+      // 各行の日付と振込ステータスをマッピング
+      let maxTimestamp = -Infinity;
+      for (let i = 1; i < rawPaymentData.length; i++) {
+        const row = rawPaymentData[i];
+        const ts = new Date(row[0]);
+        if (isNaN(ts.getTime())) continue;
+
+        const ymThis = Utilities.formatDate(ts, Session.getScriptTimeZone(), "yyyy-MM");
+        const nextDate = new Date(ts);
+        nextDate.setMonth(nextDate.getMonth() + 1);
+        const ymNext = Utilities.formatDate(nextDate, Session.getScriptTimeZone(), "yyyy-MM");
+
+        const val = row[paidColIdx];
+        const isPaid = checkIsPaid(val);
+
+        // 送信月（当月）および次月の両方に反映
+        ngsPaidStatusByMonth[ymThis] = isPaid;
+        ngsPaidStatusByMonth[ymNext] = isPaid;
+
+        if (ts.getTime() > maxTimestamp) {
+          maxTimestamp = ts.getTime();
+          latestRowIsPaid = isPaid;
+        }
+      }
+    }
+  }
 
   // 当月・次月返済マップを作成（口座別合計）
   const repaymentHeaders = repaymentData[0];
@@ -91,15 +162,31 @@ function 口座別余力() {
     }
   });
 
-  // 口座ごとのカード内訳文字列を作成する関数
-  function getCardBreakdown(bankName, row) {
+  // 口座ごとのカード内訳文字列を作成する関数（ngs返済の振込ステータス表示付き）
+  function getCardBreakdown(bankName, row, targetYm) {
     if (!row) return "";
     const details = [];
+
+    // 該当月のステータス、または最新行のステータスを参照
+    let isNgsPaid = ngsPaidStatusByMonth[targetYm];
+    if (isNgsPaid === undefined) {
+      isNgsPaid = latestRowIsPaid;
+    }
+
     paymentHeaders.forEach((header, colIdx) => {
       if (colIdx >= 2 && cardToBank[header] === bankName) {
         const amt = parseAmount(row[colIdx]);
         if (amt > 0) {
-          details.push(header + ": ¥" + amt.toLocaleString());
+          let line = header + ": ¥" + amt.toLocaleString();
+          // ngs返済の場合は振込ステータスを表示
+          if (header.includes("ngs")) {
+            if (isNgsPaid) {
+              line += " 【✔振込済】";
+            } else {
+              line += " 【⚠️未振込】";
+            }
+          }
+          details.push(line);
         }
       }
     });
@@ -198,8 +285,8 @@ function 口座別余力() {
     const diffCurrent = asset - repay;
     const diffNext = diffCurrent - nextRepay;
 
-    const cardDetailsCurrent = getCardBreakdown(key, currentPaymentRow);
-    const cardDetailsNext = getCardBreakdown(key, nextPaymentRow);
+    const cardDetailsCurrent = getCardBreakdown(key, currentPaymentRow, latestMonth);
+    const cardDetailsNext = getCardBreakdown(key, nextPaymentRow, nextMonthStr);
 
     result.push([key, asset, cardDetailsCurrent, repay, diffCurrent, cardDetailsNext, nextRepay, diffNext]);
   }
@@ -254,6 +341,26 @@ function 口座別余力() {
     outputSheet.getRange(2, 2, result.length - 1, 1).setNumberFormat('"¥"#,##0');
     outputSheet.getRange(2, 4, result.length - 1, 2).setNumberFormat('"¥"#,##0');
     outputSheet.getRange(2, 7, result.length - 1, 2).setNumberFormat('"¥"#,##0');
+  }
+
+  // --- 書式・アラートハイライト設定 ---
+  for (let r = 1; r <= result.length; r++) {
+    for (let c = 1; c <= result[0].length; c++) {
+      const cellVal = String(result[r - 1][c - 1] || "");
+      if (cellVal.includes("【⚠️未振込】")) {
+        // 未振込セルを警告カラー（薄いオレンジ背景 ＆ 赤文字・太字）で目立たせる
+        outputSheet.getRange(r, c)
+          .setBackground("#FFF3CD")
+          .setFontColor("#C0392B")
+          .setFontWeight("bold");
+      } else if (cellVal.includes("【✔振込済】")) {
+        // 振込済セルは落ち着いたグリーン
+        outputSheet.getRange(r, c)
+          .setBackground("#E8F8F5")
+          .setFontColor("#27AE60")
+          .setFontWeight("normal");
+      }
+    }
   }
 
   // タイトルが確実に表示される列幅調整
